@@ -1,0 +1,176 @@
+#!/bin/bash
+
+################################################################################
+################################################################################
+# Name:        heap-top
+# Usage:       heap-top [-h|-1|-l]
+# Description: Top but for heap
+# Created:     2021-03-26
+# Victor Mendonca - http://victormendonca.com
+#                 - https://github.com/victorbrca
+# License: Released under the terms of the MIT license
+################################################################################
+################################################################################
+
+#-------------------------------------------------------------------------------
+# Sets variables
+#-------------------------------------------------------------------------------
+
+commandline_args=("$@")
+export JAVA_HOME="/data/app/follett/wildfly/jdk"
+Black_on_White='\e[7;37;40m'
+Color_Off='\e[0m'
+usage="usage: heap-top [-h|-1|-l]
+
+    -l
+        Displays the full class or JAR file name
+
+    -1 | --once
+        Run the script once, do not continuously refresh
+
+    -h | -help
+        Display this help menu
+
+/********* Output Format *****************
+ * PID    : Process Id
+ * Name   : Process Name
+ * CurHeap: Heap memory(MB) currently in use
+ * MaxHeap: Max Heap memory(MB) used by now
+ * XMS    : Min heap size
+ * XMX    : Max heap size
+ * CurRAM : Current RAM(MB) used
+ * MaxRAM : Max RAM(MB) used by now
+ * %_CPU  : Current CPU use by PID
+ */"
+
+#-------------------------------------------------------------------------------
+# Sets functions
+#-------------------------------------------------------------------------------
+
+parse_options() {
+  for var in "${commandline_args[@]}"; do
+    if [ "$var" = "-h" ] || [ "$var" = "-help" ] ; then
+      echo "$usage"
+      exit 0
+    elif [ "$var" = "-1" ] || [ "$var" = "--once" ] ; then
+      RUNONCE=1
+    elif [[ "$var" == "-l" ]] ; then
+      DATA=("$(sudo ${JAVA_HOME}/bin/jps -l | grep -vi jps)")
+    fi
+  done
+}
+
+_mem_info ()
+{
+  free --mega | tail -2 | sed 's/:/(MB):/' | awk '{printf "%-10s %5s %-5s %5s %-5s %5s %-5s\n" , $1 , $2 , "total," , $3 , "used," ,  $4 , "free,"}'
+  echo
+}
+
+_cpu_info ()
+{
+  mpstat | tail -2 | cut -d" " -f4-45
+}
+
+#-------------------------------------------------------------------------------
+# Starts work
+#-------------------------------------------------------------------------------
+
+parse_options
+
+# Draw header
+clear
+date
+_cpu_info
+_mem_info
+echo -e "${Black_on_White} PID                Name               CurHeap  MaxHeap     XMS      XMX  CurRAM  MaxRAM  %_CPU${Color_Off}"
+
+
+declare -A prev_pid_max_heap=()
+declare -A prev_pid_max_ram=()
+
+while true ; do
+  declare -A curr_pid_name=()
+  declare -A curr_pid_max_heap=()
+  declare -A curr_pid_max_ram=()
+  
+  IFS=$'\n'
+  if [[ ! "${DATA[*]}" ]] ; then
+    DATA=("$(sudo ${JAVA_HOME}/bin/jps | grep -vi jps)")
+  fi
+  
+  # Save cursor location and move to top
+  tput sc
+  tput cup 0 0
+
+  # Re-draw date, cpu and mem usage
+  date
+  _cpu_info  
+  _mem_info
+
+  # put cursor back and then up with # of prev processes
+  tput rc
+  if (( ${#prev_pid_max_heap[@]} > 0 )) ; then
+    tput cuu $(( ${#prev_pid_max_heap[@]} )) 
+  fi
+
+  # for each process line we get in jps 
+  IFS=$' '
+  for LINE in "${DATA[@]}" ; do
+    read -ra TOKENS <<< "$LINE"
+    # if -l option is given, get the last element of the jar file/class name
+    TOKENS[1]=${TOKENS[1]##*[\\ /]}
+
+    pid=${TOKENS[0]}
+    # insert to associative array
+    curr_pid_name[$pid]=${TOKENS[1]:-"<no name>"}
+
+    # compare current heap with previous to get max_heap
+    HEAP_MEMORY=$( (sudo ${JAVA_HOME}/bin/jstat -gc "$pid" 2>/dev/null || echo "0 0 0 0 0 0 0 0 0") \
+     | grep -v S0C | awk '{split($0,a," "); sum=a[3]+a[4]+a[6]+a[8]; print sum/1024}' ) 2>/dev/null
+    HEAP_MEMORY=${HEAP_MEMORY%.*}
+    if [ "${prev_pid_max_heap["$pid"]+_}" ] && [[ "$HEAP_MEMORY" -lt "${prev_pid_max_heap[$pid]}" ]] ; then
+      curr_pid_max_heap["$pid"]="${prev_pid_max_heap["$pid"]}"
+    else
+      curr_pid_max_heap["$pid"]="$HEAP_MEMORY"
+    fi
+
+    XMX_SIZE=$(ps -ef | grep "$pid" | grep -Eo 'Xmx[0-9]*m ' | sed 's/Xmx//')
+    XMS_SIZE=$(ps -ef | grep "$pid" | grep -Eo 'Xms[0-9]*m ' | sed 's/Xms//')
+    
+    # compare current ram with previous to get max_ram
+    RAM_MEMORY=$(( $(cut -d' ' -f2 <<<cat "/proc/$pid/statm" 2>/dev/null || echo "0") / 1024 ))
+    RAM_MEMORY="${RAM_MEMORY%.*}"
+    if [ "${prev_pid_max_ram["$pid"]+_}" ] && [[ "$RAM_MEMORY" -lt "${prev_pid_max_ram[$pid]}" ]]; then
+      curr_pid_max_ram["$pid"]=${prev_pid_max_ram["$pid"]}
+    else
+      curr_pid_max_ram["$pid"]=$RAM_MEMORY
+    fi
+
+    # output for current pid
+    cpuuse=$( (ps -p "$pid" -o %cpu 2>/dev/null || echo "0") | tail -n 1 )
+    cpuuse="${cpuuse%.*}"
+    printf "%-6s %-30s %8i %8i %8s %8s %6d %7d  %5i\n" "$pid" "${curr_pid_name["$pid"]:0:30}" "$HEAP_MEMORY" "${curr_pid_max_heap["$pid"]}" "$XMS_SIZE" "$XMX_SIZE" "$RAM_MEMORY" "${curr_pid_max_ram["$pid"]}" "$cpuuse" | sort
+  done
+
+  # clean stuff of previous iteration
+  unset prev_pid_max_heap
+  declare -A prev_pid_max_heap
+  unset prev_pid_max_ram
+  declare -A prev_pid_max_ram
+
+  # put all current pid and max_memory into prev_associative_array
+  for pid in "${!curr_pid_max_heap[@]}" ; do
+    prev_pid_max_heap[$pid]=${curr_pid_max_heap[$pid]}
+  done
+
+  # put all current pid, max_ram_memory into prev associative array
+  for pid in "${!curr_pid_max_ram[@]}" ; do
+    prev_pid_max_ram[$pid]=${curr_pid_max_ram[$pid]}
+  done
+
+  if [[ "$RUNONCE" ]] && (( RUNONCE == 1 )) ; then
+    exit
+  fi
+
+  sleep 2
+done
