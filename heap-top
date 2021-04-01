@@ -17,7 +17,7 @@
 #-------------------------------------------------------------------------------
 
 commandline_args=("$@")
-export JAVA_HOME="/data/app/follett/wildfly/jdk"
+export JAVA_HOME=""
 Black_on_White='\e[7;37;40m'
 Color_Off='\e[0m'
 usage="usage: heap-top [-h|-1|-l]
